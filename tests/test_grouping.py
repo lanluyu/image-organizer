@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from organizer import FileGroup, group_files, normalize_stem
+from organizer import group_files, normalize_stem
 
 
 class TestNormalizeStem:

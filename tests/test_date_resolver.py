@@ -1,7 +1,6 @@
 # coding: utf-8
 """DateResolver 缓存层 + daemon 集成的单元测试"""
 from datetime import datetime
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
