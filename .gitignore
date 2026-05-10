@@ -1,0 +1,62 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------- Virtual environments ----------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- IDE / Editor ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---------- Project secrets ----------
+.env
+.env.*
+!.env.example
+
+# ---------- Project artifacts ----------
+logs/
+*.log
+*.organizer_state.json
+RESUME.md
+
+# ---------- ExifTool (users download their own) ----------
+exiftool.exe
+exiftool_files/
+exiftool/
+
+# ---------- Sample / test data (too large for repo) ----------
+image/
+*.HEIC
+*.heic
+*.MOV
+*.mov
+!tests/fixtures/**/*.HEIC
+!tests/fixtures/**/*.MOV
+
+# ---------- OS / misc ----------
+*.bak
+*.tmp
+*.partial
