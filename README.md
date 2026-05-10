@@ -51,11 +51,9 @@ pip install Pillow
 pip install imagehash   # 仅 --phash 时需要
 ```
 
-**ExifTool** (强烈推荐): 从 https://exiftool.org/ 下载 Windows 版。任选一种部署方式：
-- 官方 zip 直接解压到项目根：`./exiftool.exe` + `./exiftool_files/`（推荐，官方分发自带）
-- 旧约定：`./exiftool/exiftool.exe`
+**ExifTool**: 仓库已自带 Windows 版（`./exiftool.exe` + `./exiftool_files/`，根据 Artistic/GPL 协议再分发），开箱即用，无需另行下载。
 
-`detect_default_exiftool()` 会自动按上述顺序探测。
+如需升级或换平台版本，从 https://exiftool.org/ 下载后覆盖到项目根即可。`detect_default_exiftool()` 也兼容旧约定 `./exiftool/exiftool.exe`。
 没有 ExifTool 时只能依赖 Pillow，HEIC/视频时间会读不到，自动降级到文件 mtime。
 
 ## 退出码

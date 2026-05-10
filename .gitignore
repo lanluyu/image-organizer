@@ -42,9 +42,9 @@ logs/
 *.organizer_state.json
 RESUME.md
 
-# ---------- ExifTool (users download their own) ----------
-exiftool.exe
-exiftool_files/
+# ---------- ExifTool ----------
+# exiftool.exe 与 exiftool_files/ 已随仓库分发，开箱即用，无需另行下载
+# 旧的目录约定（如有）仍排除
 exiftool/
 
 # ---------- Sample / test data (too large for repo) ----------

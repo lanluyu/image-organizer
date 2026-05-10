@@ -1,0 +1,28 @@
+# Default: auto-detect text and normalize line endings
+* text=auto
+
+# Python source: enforce LF (cross-platform consistency)
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+
+# Windows-only scripts: keep CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# ExifTool: bundled binary distribution — do NOT touch line endings or content
+exiftool.exe binary
+exiftool_files/** binary
+
+# Photos / videos: binary
+*.HEIC binary
+*.heic binary
+*.MOV binary
+*.mov binary
+*.PNG binary
+*.png binary
+*.JPG binary
+*.jpg binary
+*.JPEG binary
+*.jpeg binary

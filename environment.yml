@@ -8,8 +8,6 @@ dependencies:
   - pip:
       - imagehash    # 可选: --phash 视觉去重时需要
 # 外部依赖 (非 Python):
-#   ExifTool: 从 https://exiftool.org/ 下载 Windows 版 (推荐 stay_open 持久进程提速 ~10x)
-#   解压后任选其一：
-#     ① ./exiftool.exe + ./exiftool_files/  (官方 zip 直接解压到项目根目录)
-#     ② ./exiftool/exiftool.exe             (旧约定，自行放置)
-#   detect_default_exiftool() 会自动按上述顺序探测
+#   ExifTool: 仓库已自带 Windows 版 (./exiftool.exe + ./exiftool_files/)，开箱即用
+#   如需升级或换平台版本：https://exiftool.org/ 下载后覆盖到项目根
+#   detect_default_exiftool() 兼容旧约定 ./exiftool/exiftool.exe
