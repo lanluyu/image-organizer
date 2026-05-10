@@ -1,6 +1,6 @@
 # Image Organizer
 
-[![Tests](https://github.com/USER/REPO/actions/workflows/test.yml/badge.svg)](https://github.com/USER/REPO/actions/workflows/test.yml)
+[![Tests](https://github.com/lanluyu/image-organizer/actions/workflows/test.yml/badge.svg)](https://github.com/lanluyu/image-organizer/actions/workflows/test.yml)
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
