@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Image Organizer — 功能介绍</title>
+<link rel="stylesheet" href="_style.css">
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc">
+  <div class="toc-title">目录</div>
+  <div class="toc-links">
+    <a href="#archive">1 · 按拍摄时间归档</a>
+    <a href="#dedup-byte">2 · 字节级去重</a>
+    <a href="#dedup-visual">3 · 视觉去重</a>
+    <a href="#livephoto">4 · Live Photo 配对</a>
+    <a href="#aae">5 · AAE 与编辑变体</a>
+    <a href="#atomic">6 · 跨盘原子移动</a>
+    <a href="#resume">7 · 断点续跑</a>
+    <a href="#interrupt">8 · 中断安全</a>
+    <a href="#exiftool">9 · ExifTool 加速</a>
+    <a href="#concurrency">10 · 并发计算</a>
+    <a href="#dryrun">11 · Dry-run 预演</a>
+    <a href="#failure">12 · 单点失败隔离</a>
+    <a href="#heartbeat">13 · 心跳进度</a>
+    <a href="#exitcode">14 · 退出码</a>
+    <a href="#runbat">15 · 一键启动</a>
+    <a href="#cli">16 · CLI 参数表</a>
+    <a href="#matrix">功能矩阵速查</a>
+    <a href="#scenario">场景速判</a>
+  </div>
+</nav>
+
+<main>
+<header class="doc-head">
+  <span class="badge">用户视角</span>
+  <h1>Image Organizer — 功能介绍</h1>
+  <p class="meta">
+    <span>版本 1.1.0</span>
+    <span>更新于 2026-07-25</span>
+    <span>入口 <code>organizer.py</code></span>
+  </p>
+</header>
+
+<ul class="doc-nav">
+  <li><a href="功能介绍.html" aria-current="page">功能介绍</a></li>
+  <li><a href="项目技术分析文档.html">技术分析</a></li>
+  <li><a href="项目交接文档.html">交接文档</a></li>
+  <li><a href="../README.md">README</a></li>
+</ul>
+
+<p>本文从用户视角列出所有功能，每项说明 <strong>做什么 / 怎么用 / 什么场景需要 / 实际效果</strong>。想看内部实现见<a href="项目技术分析文档.html">技术分析</a>，想 5 分钟上手见 <code>README.md</code>。</p>
+
+<h2 id="archive">1 · 按拍摄时间归档（核心功能）</h2>
+
+<p><strong>做什么</strong>：把源目录里所有照片视频按「年/月」两级目录归档到目标目录。</p>
+
+<pre><code>python organizer.py --source &lt;源&gt; --target &lt;目标&gt; --duplicates &lt;重复目录&gt;</code></pre>
+
+<h4>时间从哪来（四级降级，自动选最权威的）</h4>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>优先级</th><th>来源</th><th>日志标签</th><th>适用</th></tr></thead>
+  <tbody>
+    <tr><td class="num">1</td><td>缓存命中（ExifTool 预热填充）</td><td><code>exiftool-cache</code></td><td>多数文件</td></tr>
+    <tr><td class="num">2</td><td>ExifTool 单文件查询</td><td><code>exiftool</code></td><td>缓存未命中</td></tr>
+    <tr><td class="num">3</td><td>Pillow 读 EXIF</td><td><code>pillow</code></td><td>没装 ExifTool 时</td></tr>
+    <tr><td class="num">4</td><td>文件修改时间</td><td><code>mtime</code></td><td>前面都读不到拍摄时间</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note warn">
+  <span class="label">1.1.0 行为变更</span>
+  <p>此前 <code>File:FileModifyDate</code>（即文件 mtime）被当作有效的拍摄时间来源，导致<strong>任何文件都「有」拍摄时间</strong>：Pillow 分支永远走不到，而从 iPhone 拷贝出来、EXIF 已被剥掉的照片会按<strong>拷贝时间</strong>归到错误年份，日志却显示 <code>source=exiftool</code>，用户完全无从察觉。</p>
+  <p>现在该字段已移出候选。读不到真实拍摄时间就一路降级到 <code>mtime</code>，并在末尾汇总里计数告警：</p>
+  <pre><code>1 个文件没有 EXIF 拍摄时间，已按文件系统修改时间归档 ——
+若这些文件是拷贝得来的，归档年份可能不是真实拍摄年份</code></pre>
+</div>
+
+<h4>实际效果</h4>
+<pre><code>输入:  D:/AHAHA/DCIM/Input_Photos/IMG_1234.HEIC   <span class="cmt">(拍摄于 2024-03-15)</span>
+输出:  D:/AHAHA/DCIM/Organized_Photos/2024/03/IMG_1234.HEIC</code></pre>
+
+<p><strong>为什么不按「年/月/日」</strong>：照片量大时按月分够用，按日会产生上千个零散文件夹。需要更细可改 <code>imageorg/core.py</code> 里 <code>target_dir</code> 那一行。</p>
+
+<h2 id="dedup-byte">2 · 字节级去重（默认开启）</h2>
+
+<p><strong>做什么</strong>：内容字节完全相同的文件，第二份开始自动移到 <code>duplicates/</code> 而不是归档目录。无需参数，无法关闭。</p>
+
+<h4>算法：size 短路</h4>
+<ol>
+  <li>先 <code>stat</code> 拿文件大小</li>
+  <li>size 唯一的文件直接放行 —— 照片几乎不可能字节数完全一样而内容不同</li>
+  <li>只对 size 重复的文件算 MD5 比对</li>
+</ol>
+
+<div class="note ok">
+  <span class="label">1.1.0 修复：跨次运行去重</span>
+  <p>size 短路放行意味着这个文件的 MD5 <strong>从未算过</strong>。旧版状态文件只记 <code>{size: []}</code> 空桶，于是第二次运行遇到字节完全相同的副本时，补算出的哈希与空桶比对必然不匹配 —— <strong>分批导入照片时，第二批与第一批的重复会全部漏检</strong>。</p>
+  <p>现在短路放行的文件会把归档后的路径记入 <code>size_pending</code> 欠账表；同 size 文件再次出现时，先回补这些文件的哈希再比对。参照物被用户手工删除时跳过并告警，不影响本次归档。</p>
+</div>
+
+<h4>实际效果</h4>
+<pre><code><span class="cmt">--- 第一次运行 ---</span>
+输入: IMG_5678.JPG (100 KB)
+输出: 2024/03/IMG_5678.JPG          <span class="cmt">(size 唯一，短路放行，路径记入欠账)</span>
+
+<span class="cmt">--- 第二次运行（几天后又导入一批）---</span>
+输入: IMG_5678_copy.JPG (100 KB, 内容相同)
+输出: duplicates/IMG_5678_copy.JPG  <span class="cmt">(回补第一次的哈希后比对，判为重复)</span></code></pre>
+
+<p><strong>典型场景</strong>：iPhone 多次「导入到电脑」积累的副本；相同照片被反复拷贝。</p>
+
+<h2 id="dedup-visual">3 · 视觉去重（可选，<code>--phash</code>）</h2>
+
+<p><strong>做什么</strong>：识别「同一张图但不同压缩/分辨率」的相似版本。字节去重抓不到这种（size 不同），需要感知哈希。</p>
+
+<pre><code>python organizer.py ... --phash --phash-threshold 4</code></pre>
+
+<ul>
+  <li><code>--phash</code>：启用</li>
+  <li><code>--phash-threshold N</code>：汉明距离阈值（默认 4），越小越严格。0 = phash 完全相同，4–6 = 视觉极相似</li>
+</ul>
+
+<p><strong>前置依赖</strong>：<code>pip install imagehash</code>（没装会报错退出）；<code>pip install pillow-heif</code>（HEIC 解码）。</p>
+
+<div class="note warn">
+  <span class="label">1.1.0 修复：HEIC 静默失效</span>
+  <p>Pillow 本身不认 HEIC。此前没有 <code>pillow-heif</code> 依赖，<code>phash_of()</code> 对 <code>.heic</code> 一律返回 <code>None</code> —— <strong>而 iPhone 图库主体就是 HEIC</strong>，等于开了 <code>--phash</code> 却对绝大多数文件什么也没做，且没有任何提示。</p>
+  <p>现在 <code>pillow-heif</code> 已加入 <code>environment.yml</code> 并在启动时注册解码器。若该依赖缺失而你又启用了 <code>--phash</code>，启动时会明确告警：</p>
+  <pre><code>已启用 --phash，但缺少 pillow-heif: HEIC 文件无法解码，视觉去重对它们不生效
+(iPhone 图库主体是 HEIC)。安装: pip install pillow-heif</code></pre>
+</div>
+
+<h4>算法</h4>
+<ol>
+  <li>用 perceptual hash 算每张图的 64-bit「视觉指纹」（<strong>线程池并发解码</strong>）</li>
+  <li>BK-tree 索引找近邻，查询接近 O(log N)</li>
+  <li>距离 ≤ threshold 视为视觉重复，整组进 <code>duplicates/</code></li>
+</ol>
+
+<h4>实际效果</h4>
+<pre><code>输入: photo.jpg            <span class="cmt">(原图, 5 MB)</span>
+      photo_compressed.jpg <span class="cmt">(压缩版, 800 KB, 同一张照片)</span>
+输出: 2024/03/photo.jpg               <span class="cmt">(归档, phash 入库)</span>
+      duplicates/photo_compressed.jpg <span class="cmt">(距离 0, 视觉重复)</span>
+日志: pHash 视觉重复 (dist=0): photo_compressed.jpg ≈ .../2024/03/photo.jpg</code></pre>
+
+<p><strong>典型场景</strong>：微信 / iMessage 压缩版与原图共存；从邮件下载的低质量副本。</p>
+
+<p><strong>已知限制</strong>：pHash 不区分颜色（DCT 后只看亮度结构），纯色图（200×200 全红 vs 全蓝）会被误判为相同。复杂照片基本不会误判。</p>
+
+<h2 id="livephoto">4 · Live Photo 配对</h2>
+
+<p><strong>做什么</strong>：iPhone 实况照片由 <code>IMG_xxxx.HEIC</code>（主图）+ <code>IMG_xxxx.MOV</code>（实况视频）组成。本工具识别同名 HEIC + MOV 为一组，<strong>用主图的时间归档到同一目录</strong>。默认开启。</p>
+
+<p><strong>为什么重要</strong>：两者的 EXIF 时间常常差几秒（拍照瞬间有先后），独立按时间归档可能跨月分到不同目录，破坏 iPhone 重新导入时的实况关联。</p>
+
+<pre><code>输入: IMG_1234.HEIC <span class="cmt">(EXIF:       2024-02-29 23:59:58)</span>
+      IMG_1234.MOV  <span class="cmt">(CreateDate: 2024-03-01 00:00:01)</span>
+输出: 2024/02/IMG_1234.HEIC  <span class="cmt">← 用 HEIC 时间决定目录</span>
+      2024/02/IMG_1234.MOV   <span class="cmt">← MOV 跟随，不独立按 03 月归档</span></code></pre>
+
+<p><strong>primary 选取规则</strong>（同名多文件时谁决定目录）：图片 &gt; 视频 &gt; sidecar，同优先级取首个。</p>
+
+<h2 id="aae">5 · AAE sidecar 跟随 + IMG_E 编辑变体识别</h2>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>文件</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td><code>IMG_1234.AAE</code></td><td>编辑参数（裁剪、滤镜等元数据）</td></tr>
+    <tr><td><code>IMG_E1234.JPG/HEIC/AAE</code></td><td>「E」前缀 = edited，编辑后的导出版</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><strong>关键归一化</strong>：<code>IMG_E1234</code> → <code>IMG_1234</code>，所有 stem 相同的文件聚成一组。不归一化的话 <code>IMG_E1234.AAE</code> 与 <code>IMG_1234.HEIC</code> stem 不同，AAE 会被当成独立文件按自身时间戳分到错误月份，破坏编辑参数与原图的关联。</p>
+
+<pre><code>输入: IMG_1234.HEIC   <span class="cmt">(原图)</span>
+      IMG_1234.MOV    <span class="cmt">(Live Photo 视频)</span>
+      IMG_E1234.JPG   <span class="cmt">(编辑后导出)</span>
+      IMG_E1234.AAE   <span class="cmt">(编辑参数)</span>
+输出: 全部归档到 2024/03/ 同一目录</code></pre>
+
+<h2 id="atomic">6 · 跨盘原子移动（断电安全）</h2>
+
+<p><strong>做什么</strong>：source 与 target 在不同硬盘时，用两阶段提交保证移动的原子性，断电不留半成品。默认开启，同盘用 <code>os.replace</code>，跨盘自动切两阶段。</p>
+
+<p><strong>为什么重要</strong>：标准库 <code>shutil.move</code> 跨盘时退化成 copy + unlink，<strong>非原子</strong>。中途断电会留下「目标半成品 + 源完好」，下次扫描会再次「成功归档」源文件，造成永久残留。</p>
+
+<div class="diagram">跨盘两阶段流程
+
+  ① copy 到 target.partial
+  ② fsync 强制刷盘        ← 避免内容还在 page cache 时崩溃
+  ③ 原子 rename: target.partial → target
+  ④ 删源文件</div>
+
+<div class="note ok">
+  <span class="label">1.1.0 修复：非跨卷错误被误判</span>
+  <p>此前用裸 <code>except OSError</code> 判定「跨卷」，于是权限拒绝、目标被占用等同样是 <code>OSError</code> 的错误也会退化成 copy 两阶段 —— 把一个本该失败的移动变成「复制一份再删源」，删源同样失败时会留下两份数据。现在改为判定 <code>errno.EXDEV</code> 或 Windows <code>winerror 17</code>，其它错误原样抛出。</p>
+</div>
+
+<h2 id="resume">7 · 断点续跑（默认开启）</h2>
+
+<p>状态写入 <code>&lt;target&gt;/.organizer_state.json</code>，中断后下次启动自动跳过已处理文件。想从头跑加 <code>--no-resume</code>，或直接删掉状态文件。</p>
+
+<h4>状态内容（v3 格式）</h4>
+<pre><code>{
+  "version": 3,
+  "size_hashes":  {"123456": ["hash1", "hash2"]},        <span class="cmt">← 跨次字节去重</span>
+  "size_pending": {"789012": ["D:/tgt/2024/03/a.heic"]}, <span class="cmt">← size 短路欠账</span>
+  "processed_paths": ["D:/src/IMG_1234.HEIC"],           <span class="cmt">← 跳过已处理</span>
+  "saved_at": "2026-07-25T15:54:03"
+}</code></pre>
+
+<p><strong>版本兼容</strong>：v1（无 size 信息）丢弃哈希历史保留断点路径；v2（无欠账表）可直接加载，但那批短路文件的哈希已永久缺失，加载时会告警说明。</p>
+
+<p><strong>何时存盘</strong>：每 30 秒心跳、Ctrl+C 时、正常退出时。断电最多丢 30 秒进度。</p>
+
+<h2 id="interrupt">8 · 中断安全（Ctrl+C）</h2>
+
+<p>按下 Ctrl+C 后存盘并以退出码 <code>130</code> 干净退出，下次重复同样命令即可续跑。</p>
+
+<div class="note warn">
+  <span class="label">1.1.0 修复：保护有洞</span>
+  <p>此前中断处理只包住主循环，而 <strong>MD5 并发计算与 ExifTool 预热都在主循环之前</strong>，且常常是整轮里最耗时的部分。那段时间按 Ctrl+C：<code>KeyboardInterrupt</code> 不是 <code>Exception</code> 子类，<code>main()</code> 的兜底接不住 → 直接 traceback 退出、<strong>状态不存盘</strong>、退出码也不是文档承诺的 130。</p>
+  <p>现在中断处理上移到 <code>run()</code> 统一收口，覆盖扫描 / MD5 / pHash / 预热 / 主循环全部阶段。后台预热线程通过中止标志在批次间退出，线程池用 <code>cancel_futures</code> 取消排队任务 —— Ctrl+C 不会被几千个已排队任务拖住。</p>
+</div>
+
+<h2 id="exiftool">9 · ExifTool 持久进程加速（自动）</h2>
+
+<p>读取 EXIF 时不再每文件 fork 一次进程，而是常驻一个 ExifTool 进程通过 stdin/stdout 批量交互，省掉数千次冷启动。只要检测到 ExifTool 可执行文件即自动启用。</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>文件数</th><th>每文件 fork</th><th>持久进程</th><th>提速</th></tr></thead>
+  <tbody>
+    <tr><td class="num">1 000</td><td class="num">5–8 min</td><td class="num">30–60 sec</td><td class="num">~10x</td></tr>
+    <tr><td class="num">5 000</td><td class="num">25–40 min</td><td class="num">2–3 min</td><td class="num">~13x</td></tr>
+    <tr><td class="num">10 000</td><td class="num">50–80 min</td><td class="num">4–6 min</td><td class="num">~13x</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><strong>部署</strong>：仓库已自带 Windows 版（<code>./exiftool.exe</code> + <code>./exiftool_files/</code>），开箱即用。也兼容旧约定 <code>./exiftool/exiftool.exe</code>。</p>
+
+<p><strong>容错</strong>：daemon 崩溃自动重启（最多 3 次），超限后整体降级到 Pillow / mtime，不影响主流程。</p>
+
+<h2 id="concurrency">10 · 并发计算（MD5 + pHash）</h2>
+
+<pre><code>python organizer.py ... --workers 8</code></pre>
+
+<p>默认 4 worker。MD5 与 pHash 都走线程池；ExifTool 预热同时在后台线程跑，与两者重叠，不再串行等待。</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>计算</th><th>实测</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>MD5</td><td>2–4x</td><td>IO 密集，取决于磁盘</td></tr>
+    <tr><td>pHash</td><td><strong>2.41x</strong></td><td>28 张 HEIC / 85.6 MB：串行 6.01s → 8 线程 2.49s</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>图像解码（整张图解码 + DCT）远比 MD5 昂贵，串行会让 <code>--phash</code> 成为整轮的瓶颈 —— 这是 1.1.0 并发化的主要动因。</p>
+
+<h2 id="dryrun">11 · Dry-run 预演</h2>
+
+<pre><code>python organizer.py ... --dry-run</code></pre>
+
+<p>完整跑一遍流程但不实际移动文件，只打印会做什么：</p>
+
+<pre><code>[DRY-RUN] D:/.../IMG_1234.HEIC -&gt; D:/.../tgt/2024/03/IMG_1234.HEIC
+[DRY-RUN] D:/.../IMG_5678.JPG  -&gt; D:/.../dup/IMG_5678.JPG</code></pre>
+
+<div class="note ok">
+  <span class="label">1.1.0 修复：预演有副作用</span>
+  <p>此前 <code>mkdir</code> 在 dry-run 判断<strong>之前</strong>执行，一次预演会在磁盘上创建 target / duplicates 以及完整的年/月空目录树。现在 dry-run 不再创建任何目录，也不写状态文件，多次预演不会污染断点数据。</p>
+</div>
+
+<p><strong>典型场景</strong>：对新目录首次运行前先看一眼分配是否合理；调整 <code>--phash-threshold</code> 后看视觉去重的激进程度。</p>
+
+<h2 id="failure">12 · 单点失败隔离</h2>
+
+<p>单个文件失败不会让整个批量任务挂掉，失败收集起来末尾统一打印。</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>类型</th><th>含义</th><th>退出码</th></tr></thead>
+  <tbody>
+    <tr><td><code>FAIL</code></td><td>业务失败，如完全读不到时间</td><td class="num">1</td></tr>
+    <tr><td><code>ERROR</code></td><td>脚本异常，如 IO 错误、权限拒绝</td><td class="num">2</td></tr>
+  </tbody>
+</table>
+</div>
+
+<pre><code>处理完成
+  扫描:       5000
+  归档成功:   4998
+  业务失败:   1
+  脚本异常:   1
+
+失败清单 (共 2 条):
+  [FAIL]  D:/.../damaged.heic -&gt; 读取时间失败: ValueError: invalid date
+  [ERROR] D:/.../locked.jpg   -&gt; stat 失败: PermissionError: ...</code></pre>
+
+<h2 id="heartbeat">13 · 心跳进度</h2>
+
+<p>每 30 秒打印一次进度，避免长跑时不知道是卡住还是在跑；同时触发状态盘存。</p>
+
+<pre><code>2026-07-25 15:54:03 | INFO | 心跳 1500/5000 (30.0%)
+2026-07-25 15:54:33 | INFO | 心跳 2400/5000 (48.0%)</code></pre>
+
+<h2 id="exitcode">14 · 退出码语义</h2>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>退出码</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td class="num"><code>0</code></td><td>全部成功</td></tr>
+    <tr><td class="num"><code>1</code></td><td>有业务失败（FAIL）</td></tr>
+    <tr><td class="num"><code>2</code></td><td>有脚本异常（ERROR）或参数错误</td></tr>
+    <tr><td class="num"><code>130</code></td><td>用户 Ctrl+C 中断（状态已保存，可续跑）</td></tr>
+  </tbody>
+</table>
+</div>
+
+<pre><code>python organizer.py ...
+if ($LASTEXITCODE -eq 0)        { Write-Host "全部成功" }
+elseif ($LASTEXITCODE -eq 130)  { Write-Host "已中断，明天续跑" }
+else { Write-Host "有失败，查看日志"; exit $LASTEXITCODE }</code></pre>
+
+<h2 id="runbat">15 · 双击启动（两种）</h2>
+
+<h3>启动处理照片.bat —— 交互式向导（推荐首次使用）</h3>
+
+<p>双击后打开一个 PowerShell 7 窗口，全程引导：</p>
+
+<div class="diagram">① 说明用途，并明确提示「文件是移动不是复制，源目录会被清空」
+② 依次填写 源目录 / 目标目录 / 重复目录
+     · 支持从资源管理器直接拖拽路径进来
+     · 目标与重复目录会给出推荐值，回车即用
+③ 选项：视觉去重（含阈值）· 并发数 · 日志级别
+     · 每项都带一句说明和推荐值，回车即采用
+     · 自动检测 imagehash / pillow-heif，装了才提供对应选项
+④ 确认页：待处理文件数与总体积、断点状态、等效命令行
+⑤ 先自动跑一次 --dry-run，看完结果再决定是否真正执行
+⑥ 执行，结束后按退出码给出中文结论</div>
+
+<p><strong>会替你挡掉的错误配置</strong>：源目录与目标目录相同、目标与重复目录相同、源目录位于目标目录内部、源目录不存在、源目录里没有可处理的文件。</p>
+
+<p><strong>两个便利功能</strong>：</p>
+<ul>
+  <li><strong>记住配置</strong> —— 确认执行时把本次设置存到 <code>.launcher-config.json</code>，下次启动直接问「沿用上次配置？」，一路回车即可</li>
+  <li><strong>日志落盘</strong> —— 可选把本次完整输出写到 <code>logs/organizer-yyyyMMdd-HHmmss.log</code>，长跑结束后仍可回看</li>
+</ul>
+
+<div class="note">
+  <span class="label">依赖</span>
+  <p>需要 PowerShell 7（<code>pwsh.exe</code>）。Windows 自带的 5.1 不适用 —— 没装时 <code>启动处理照片.bat</code> 会直接给出 <code>winget install --id Microsoft.PowerShell</code> 的提示而不是报一堆语法错。</p>
+</div>
+
+<h3>run.bat —— 固定配置一键跑</h3>
+
+<p>不交互，预设路径后调用 <code>organizer.py</code> 并打印中文结果摘要。适合路径固定、重复运行的场景。编辑文件顶部三个变量即可：</p>
+
+<pre><code>set "SOURCE=D:\AHAHA\DCIM\Input_Photos"
+set "TARGET=D:\AHAHA\DCIM\Organized_Photos"
+set "DUPLICATES=D:\AHAHA\DCIM\Duplicates"</code></pre>
+
+<p>默认带 <code>--phash --workers 8</code>。<strong>注意它不会先预演</strong>，双击即真正移动文件 —— 拿不准时用 <code>启动处理照片.bat</code>。</p>
+
+<h2 id="cli">16 · 完整 CLI 参数表</h2>
+
+<pre><code>--source DIR              源目录（必填，待整理的照片所在）
+--target DIR              目标目录（必填，按年/月归档到这里）
+--duplicates DIR          重复文件目录（必填）
+--exiftool PATH           exiftool.exe 路径（默认自动探测）
+--dry-run                 只打印不移动（决策前预演）
+--phash                   启用视觉去重（需 imagehash 库）
+--phash-threshold INT     pHash 汉明距离阈值（默认 4）
+--workers INT             并发 worker 数，作用于 MD5 与 pHash（默认 4）
+--no-resume               禁用断点续跑（从头跑）
+--log-level LEVEL         DEBUG / INFO / WARNING / ERROR（默认 INFO）</code></pre>
+
+<h2 id="matrix">功能矩阵速查</h2>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>类别</th><th>功能</th><th>默认</th><th>开关</th></tr></thead>
+  <tbody>
+    <tr><td>归档</td><td>按 EXIF 时间分年/月</td><td>开</td><td>总是</td></tr>
+    <tr><td>归档</td><td>无拍摄时间时降级 mtime 并计数告警</td><td>开</td><td>总是</td></tr>
+    <tr><td>去重</td><td>字节级（size 短路 + MD5 + 欠账回补）</td><td>开</td><td>总是</td></tr>
+    <tr><td>去重</td><td>视觉级（pHash + BK-tree，含 HEIC）</td><td>关</td><td><code>--phash</code></td></tr>
+    <tr><td>配对</td><td>Live Photo（HEIC + MOV）</td><td>开</td><td>总是</td></tr>
+    <tr><td>配对</td><td>AAE sidecar + IMG_E 编辑变体归一</td><td>开</td><td>总是</td></tr>
+    <tr><td>安全</td><td>跨盘原子移动（仅 EXDEV 才两阶段）</td><td>开</td><td>总是</td></tr>
+    <tr><td>安全</td><td>单点失败隔离</td><td>开</td><td>总是</td></tr>
+    <tr><td>安全</td><td>Ctrl+C 覆盖全阶段 + 存盘</td><td>开</td><td>总是</td></tr>
+    <tr><td>性能</td><td>ExifTool 持久进程（与哈希阶段重叠）</td><td>开</td><td>自动</td></tr>
+    <tr><td>性能</td><td>并发 MD5 + 并发 pHash</td><td>开</td><td><code>--workers N</code></td></tr>
+    <tr><td>进度</td><td>30 秒心跳 + 状态盘存</td><td>开</td><td>总是</td></tr>
+    <tr><td>调试</td><td>Dry-run 预演（零磁盘副作用）</td><td>关</td><td><code>--dry-run</code></td></tr>
+    <tr><td>续跑</td><td>断点续跑（状态 v3）</td><td>开</td><td><code>--no-resume</code> 关闭</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="scenario">适用场景速判</h2>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>你的需求</th><th>推荐命令</th></tr></thead>
+  <tbody>
+    <tr><td>第一次整理 iPhone 几千张照片</td><td><code>--phash --workers 8</code>（先 <code>--dry-run</code> 看一眼）</td></tr>
+    <tr><td>只想重新整理，不想视觉去重</td><td>不加 <code>--phash</code>；字节去重无法关闭</td></tr>
+    <tr><td>中断后续跑</td><td>重复同样命令即可</td></tr>
+    <tr><td>网络盘 / 外置盘慢</td><td><code>--workers 2</code> 降并发，避免 IO 阻塞</td></tr>
+    <tr><td>调试归档结果</td><td><code>--dry-run --log-level DEBUG</code></td></tr>
+    <tr><td>完全重新跑（清空状态）</td><td><code>--no-resume</code>，或删 <code>&lt;target&gt;/.organizer_state.json</code></td></tr>
+    <tr><td>怀疑归档年份不对</td><td>看汇总里「没有 EXIF 拍摄时间」的计数告警</td></tr>
+  </tbody>
+</table>
+</div>
+
+<footer>
+  Image Organizer 1.1.0 · 配套文档：<a href="项目技术分析文档.html">技术分析</a> · <a href="项目交接文档.html">交接文档</a> · <a href="../README.md">README</a> · <a href="../CHANGELOG.md">CHANGELOG</a>
+</footer>
+
+</main>
+</div>
+</body>
+</html>

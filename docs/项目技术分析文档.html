@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Image Organizer — 技术分析</title>
+<link rel="stylesheet" href="_style.css">
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc">
+  <div class="toc-title">目录</div>
+  <div class="toc-links">
+    <a href="#position">1 · 项目定位</a>
+    <a href="#stack">2 · 技术栈</a>
+    <a href="#arch">3 · 整体架构</a>
+    <a href="#modules">4 · 核心模块</a>
+    <a href="#m-exiftool" class="sub">4.2 ExifToolDaemon</a>
+    <a href="#m-dates" class="sub">4.3 DateResolver</a>
+    <a href="#m-bktree" class="sub">4.4 PHashBKTree</a>
+    <a href="#m-grouping" class="sub">4.5 group_files</a>
+    <a href="#m-core" class="sub">4.6 Organizer</a>
+    <a href="#algo">5 · 关键算法</a>
+    <a href="#a-size" class="sub">5.1 size 短路 + 欠账</a>
+    <a href="#a-move" class="sub">5.2 跨卷原子 move</a>
+    <a href="#a-date" class="sub">5.3 时间来源判定</a>
+    <a href="#perf">6 · 性能优化总览</a>
+    <a href="#errors">7 · 错误处理与容错</a>
+    <a href="#tests">8 · 测试策略</a>
+    <a href="#debt">9 · 已知技术债</a>
+    <a href="#philosophy">10 · 工程哲学体现</a>
+  </div>
+</nav>
+
+<main>
+<header class="doc-head">
+  <span class="badge">维护者视角</span>
+  <h1>Image Organizer — 技术分析</h1>
+  <p class="meta">
+    <span>版本 1.1.0</span>
+    <span>更新于 2026-07-25</span>
+    <span>10 个模块 / 1375 行</span>
+    <span>74 用例全过</span>
+  </p>
+</header>
+
+<ul class="doc-nav">
+  <li><a href="功能介绍.html">功能介绍</a></li>
+  <li><a href="项目技术分析文档.html" aria-current="page">技术分析</a></li>
+  <li><a href="项目交接文档.html">交接文档</a></li>
+  <li><a href="../README.md">README</a></li>
+</ul>
+
+<h2 id="position">1 · 项目定位</h2>
+
+<p>iPhone 照片/视频批量整理工具。输入一个混乱的导出目录，输出按拍摄时间归档（<code>年/月/</code>）的整洁目录，自动识别重复（字节级 + 视觉级）、保留 Live Photo 与 AAE sidecar 的配对关系、支持中断续跑。</p>
+
+<p><strong>为什么写这个工具</strong>：iPhone「导入到电脑」出来的目录是平铺的几千个文件，跨年跨月混在一起；HEIC + MOV 的 Live Photo 配对、IMG_E 编辑变体、AAE 编辑参数之间的关联容易被破坏；多次导入容易积累重复。系统自带工具对这些都没有合理处理。</p>
+
+<h2 id="stack">2 · 技术栈</h2>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>层</th><th>选型</th><th>理由</th></tr></thead>
+  <tbody>
+    <tr><td>语言</td><td>Python 3.12（conda env <code>douyin</code>）</td><td>type hints / dataclass；与抖音视频分析项目共用环境</td></tr>
+    <tr><td>图像 IO</td><td>Pillow + pillow-heif</td><td>行业标准；pillow-heif 提供 HEIC 解码</td></tr>
+    <tr><td>EXIF</td><td>ExifTool 13.x（外部 exe，仓库自带）</td><td>覆盖 HEIC / RAW / 视频；Pillow 仅 JPEG/PNG</td></tr>
+    <tr><td>视觉哈希</td><td>imagehash (pHash)</td><td>算法成熟；可选依赖</td></tr>
+    <tr><td>测试</td><td>pytest + unittest.mock</td><td>—</td></tr>
+    <tr><td>平台</td><td>Windows 11</td><td>单一目标平台，<code>os.name == "nt"</code> 分支隐藏窗口</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><strong>软依赖策略</strong>：Pillow / imagehash / pillow-heif / ExifTool 全部是软依赖，缺失时降级而非崩溃。统一收口在 <code>imageorg/imaging.py</code>，并导出 <code>HEIC_SUPPORTED</code> 供上层判断是否需要提醒用户。</p>
+
+<div class="note">
+  <span class="label">降级 ≠ 静默</span>
+  <p>1.1.0 的一条设计原则：<strong>降级必须可见</strong>。缺 pillow-heif 而启用 <code>--phash</code> 会告警；读不到拍摄时间而用 mtime 会计数并在汇总里告警。此前这两处都是静默的，用户拿到错误结果却毫不知情。</p>
+</div>
+
+<h2 id="arch">3 · 整体架构</h2>
+
+<div class="diagram">organizer.py  ← 兼容入口（再导出，保持 from organizer import X 可用）
+      │
+      ▼
+imageorg/
+  imaging.py    可选依赖收口（Pillow / imagehash / pillow-heif / HEIC_SUPPORTED）
+  constants.py  扩展名集合、DATE_KEYS、心跳间隔、normalize_stem
+  models.py     Config / Stats / FailureRecord
+  exiftool.py   ExifToolDaemon（-stay_open 协议）
+  dates.py      DateResolver（cache → daemon → Pillow → mtime）
+  grouping.py   FileGroup / group_files（Live Photo + AAE 配对）
+  dedup.py      md5_of / phash_of / hamming / PHashBKTree
+  state.py      load_state / save_state（v3，含 v1/v2 迁移）
+  core.py       Organizer 主调度
+  cli.py        argparse → Config → Organizer.run()</div>
+
+<h3>流水线</h3>
+
+<div class="diagram">Organizer.run()
+  ├─ 建目录（dry-run 时跳过）/ 载入断点状态 / 注册 SIGINT
+  └─ _run_pipeline()
+       ① 扫描 (_iter_files)          排除 target/dup 子树
+       ② 扩展过滤                    SUPPORTED_EXTENSIONS
+       ③ 断点续跑过滤                processed_paths 命中跳过
+       ④ 分组 (group_files)          IMG_E 归一 + sidecar 跟随
+       ⑤ size 短路 + 前置计算
+            ├── 后台线程: ExifTool prewarm  ┐
+            ├── 线程池:   并发 MD5          ├─ 三者重叠
+            └── 线程池:   并发 pHash        ┘
+       ⑥ 串行处理每组 (_process_group)  去重 → 归档 → 移 dup
+       ⑦ 收尾                        flush state + 汇总
+       ⑧ 退出码
+
+  中断与 daemon 清理由 run() 的 try/except KeyboardInterrupt + finally 统一收口</div>
+
+<p>数据流的关键性质：</p>
+<ul>
+  <li><strong>扫描–决策–执行三段分离</strong>：扫描全量 → 一次性算 size / MD5 / pHash / EXIF → 串行 move（避免目标路径冲突）</li>
+  <li><strong>决策阶段尽量批量并重叠</strong>：MD5 并发、pHash 并发、ExifTool 持久进程在后台线程 —— 把「每文件一次系统调用」摊销掉</li>
+  <li><strong>执行阶段串行</strong>：move 不可逆，串行才能正确处理同名冲突（<code>_unique_path</code> 加 <code>_1</code>/<code>_2</code> 后缀）</li>
+</ul>
+
+<h2 id="modules">4 · 核心模块</h2>
+
+<h3>4.1 数据结构</h3>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>类</th><th>位置</th><th>职责</th></tr></thead>
+  <tbody>
+    <tr><td><code>Stats</code></td><td>models.py</td><td>末尾汇总计数，含 <code>date_from_mtime</code></td></tr>
+    <tr><td><code>FailureRecord</code></td><td>models.py</td><td>失败记录（path / kind / message）</td></tr>
+    <tr><td><code>Config</code></td><td>models.py</td><td>运行配置，由 argparse 填充</td></tr>
+    <tr><td><code>FileGroup</code></td><td>grouping.py</td><td>一组应一起移动的文件（primary + companions）</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>全部 <code>@dataclass</code>，强制 type hints，无 <code>Any</code>、无裸 <code>dict</code>。</p>
+
+<h3 id="m-exiftool">4.2 ExifToolDaemon（exiftool.py）</h3>
+
+<p>封装 ExifTool <code>-stay_open True -@ -</code> 持久进程协议。</p>
+
+<div class="diagram">启动  → exiftool.exe -stay_open True -@ - -common_args -charset filename=utf8
+        stdin=PIPE, stdout=PIPE, stderr=DEVNULL   ← 关键
+查询  → 写参数（每行一个）+ "-execute\n" + flush
+读结果 → readline 循环到 "{ready}\n" sentinel
+关闭  → 写 "-stay_open\nFalse\n" → wait(5s) → terminate(2s) → kill</div>
+
+<div class="note warn">
+  <span class="label">两个致命陷阱（已写入测试与注释）</span>
+  <p>① <code>stderr=subprocess.STDOUT</code> 会让诊断行 <code>"3 image files read"</code> 混入 stdout 污染 JSON 解析 —— <strong>必须 DEVNULL</strong>。</p>
+  <p>② 加 <code>-q</code> 看似能静默诊断，但 <code>-q</code> 会连 <code>{ready}</code> sentinel 一起压制，导致 <code>readline</code> 永久阻塞 —— <strong>绝对不能加</strong>。</p>
+</div>
+
+<p><strong>崩溃恢复</strong>：<code>_ensure_alive</code> 检测 <code>proc.poll()</code>，已退出则启动新进程；<code>_restart_count &lt; max_restarts</code>（默认 3）才允许，超限抛 <code>RuntimeError</code> 让上层降级。</p>
+
+<h3 id="m-dates">4.3 DateResolver（dates.py）</h3>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>优先级</th><th>来源</th><th>标签</th><th>适用</th></tr></thead>
+  <tbody>
+    <tr><td class="num">1</td><td>缓存命中</td><td><code>exiftool-cache</code></td><td>prewarm 阶段填充</td></tr>
+    <tr><td class="num">2</td><td>daemon 单文件查询</td><td><code>exiftool</code></td><td>缓存未命中（罕见）</td></tr>
+    <tr><td class="num">3</td><td>Pillow EXIF</td><td><code>pillow</code></td><td>没装 ExifTool 时</td></tr>
+    <tr><td class="num">4</td><td>文件 mtime</td><td><code>mtime</code></td><td>最终兜底，不抛异常</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><strong>为什么要「prewarm 缓存 + 命中查询」两段式</strong>：</p>
+<ul>
+  <li>直接改 <code>resolve()</code> 全批量 → 调用方改动大，每文件的 <code>FailureRecord</code> 错误处理变复杂</li>
+  <li>纯懒式每文件 daemon 查询 → 失去批量优势，单次 round-trip 仍有 stdin/stdout 开销</li>
+  <li>当前两段式：prewarm 每批 100 文件喂给 daemon，结果填进 dict；<code>resolve()</code> 命中缓存零开销，未命中也走同一 daemon 不再 fork。<strong>调用方零改动 + 性能最优</strong></li>
+</ul>
+
+<p><code>_daemon_disabled</code> 旗标：daemon 重启超限后置 <code>True</code>，后续 <code>resolve</code> 跳过 daemon 直接走 Pillow，避免每文件都试一次重启浪费时间。</p>
+
+<p><strong>1.1.0 新增</strong>：<code>prewarm(should_abort=...)</code> 批次间中止钩子。prewarm 现在跑在后台线程里，可能持续几分钟，用户 Ctrl+C 时必须能在一个批次（~100 文件）内退出，而不是拖住整个进程。</p>
+
+<h3 id="m-bktree">4.4 PHashBKTree（dedup.py）</h3>
+
+<p>汉明距离度量空间的 BK-tree，用于 pHash 视觉去重的近邻搜索。</p>
+
+<p><strong>为什么需要</strong>：旧实现每张新图与历史所有 phash 线性比对，O(N²)。1 万张照片 ≈ 5000 万次 hamming 计算。</p>
+
+<p><strong>算法</strong>：节点 <code>[hash_int, value, children_dict]</code>，<code>children_dict[d]</code> 是「到当前节点距离为 d」的子树。查询时利用三角不等式 <code>|d(x,p) − d(y,p)| ≤ d(x,y)</code>，只递归到 <code>[d − threshold, d + threshold]</code> 的子桶。</p>
+
+<p><strong>复杂度</strong>：理论 O(log N)，实际取决于 hash 分布与 threshold；threshold ≤ 4 时剪枝非常激进。</p>
+
+<p><strong>正确性验证</strong>：<code>test_pruning_does_not_miss_neighbors</code> 用 500 个随机 64-bit hash 与线性扫描对比，必须返回完全相同的近邻集。</p>
+
+<h3 id="m-grouping">4.5 group_files（grouping.py）</h3>
+
+<p>把扁平文件列表分组为 <code>FileGroup</code>。聚合 key = <code>(parent_dir, normalize_stem(stem).lower())</code>。</p>
+
+<p><strong>关键归一化</strong>：<code>normalize_stem</code> 把 <code>IMG_E1234</code> 替换为 <code>IMG_1234</code>。iPhone 编辑过的照片 sidecar 是 <code>IMG_E1234.AAE</code>，主图是 <code>IMG_1234.HEIC</code>，stem 不同 —— 不归一化的话 AAE 会被当成独立 primary 单独归档，破坏与原图的关联。</p>
+
+<p><strong>primary 选取优先级</strong>：图片 (0) &gt; 视频 (1) &gt; sidecar (2)，同优先级取首个（list sort 稳定）。</p>
+
+<h3 id="m-core">4.6 Organizer（core.py，589 行）</h3>
+
+<ul>
+  <li><strong><code>run()</code> / <code>_run_pipeline()</code> 分离</strong>：前者负责建目录、载状态、注册信号、中断收口与 daemon 清理；后者是纯流水线。这样中断处理只写一处，覆盖全部阶段</li>
+  <li><strong>每组独立 try/except</strong>：单点失败入 <code>FailureRecord</code> 继续下一组。捕的是 <code>Exception</code>，<code>KeyboardInterrupt</code> 是 <code>BaseException</code> 不会被吞</li>
+  <li><strong><code>_parallel_map</code> 共用 helper</strong>：MD5 与 pHash 共享同一并发骨架，退出时 <code>shutdown(wait=False, cancel_futures=True)</code>，Ctrl+C 只等在跑的那几个任务</li>
+  <li><strong>心跳 + 周期 flush_state</strong>：30 秒一次进度日志 + 状态盘存，断电最多丢 30 秒进度</li>
+</ul>
+
+<h2 id="algo">5 · 关键算法</h2>
+
+<h3 id="a-size">5.1 size 短路去重 + 欠账回补</h3>
+
+<p><strong>问题</strong>：全量 MD5 每文件读完整内容，IO 密集。</p>
+
+<ol>
+  <li><code>_stat_sizes</code>：一遍 stat 拿所有 primary 的 size</li>
+  <li><code>_select_hash_candidates</code>：决策哪些需要 MD5
+    <ul>
+      <li>size 在历史 <code>_size_to_hashes</code> <strong>或 <code>_size_pending</code></strong> 中出现过 → 必算</li>
+      <li>当前批次同 size 出现 ≥ 2 次 → 必算</li>
+      <li>否则 size 唯一 → <strong>跳过 MD5</strong></li>
+    </ul>
+  </li>
+  <li><code>_parallel_hash</code>：只对 candidates 并发算 MD5</li>
+</ol>
+
+<p><strong>为什么对</strong>：照片几乎不可能字节数完全一样而内容不同 —— JPEG 压缩、HEIC 编码都把每个文件 size 打散。size 唯一就足以判定「必然不是字节重复」。</p>
+
+<div class="note warn">
+  <span class="label">1.1.0 修复的正确性缺口</span>
+  <p>短路放行意味着该文件的 MD5 <strong>从未算过</strong>。旧实现只写入 <code>{size: set()}</code> 空桶并持久化为 <code>{"size": []}</code>。于是：</p>
+  <div class="diagram">第 1 次运行: a.jpg (12345 字节, size 唯一) → 短路放行, state = {12345: []}
+第 2 次运行: b.jpg (与 a.jpg 字节完全相同)
+             size 12345 在历史中 → 补算 MD5 = H
+             bucket 为空集 → H 不在其中 → 判为新文件，重复漏检 ✗</div>
+  <p>README 曾宣称「断点续跑时跨次去重也走 size 短路」，实际不成立。<strong>分批导入照片时，第二批与第一批的重复会全部漏检。</strong></p>
+  <p><strong>解法</strong>：新增 <code>size_pending: {size: [归档后路径]}</code> 欠账表。短路放行的文件在移动成功后把目标路径记入欠账；同 size 文件再次出现时，<code>_backfill_pending(size)</code> 先对欠账路径补算 MD5 折进桶里再比对。参照物已被用户手工删除时捕 <code>OSError</code> 跳过并告警 —— 不是本次处理的文件，不记为失败。</p>
+</div>
+
+<p><strong>为什么不干脆全算 MD5</strong>：那就放弃了短路优化本身。欠账表只在「size 恰好出现过一次」时才有条目，规模远小于全量哈希表，且空桶不写盘（<code>save_state</code> 过滤空列表）。</p>
+
+<h3 id="a-move">5.2 跨卷原子 move</h3>
+
+<p><strong>问题</strong>：<code>shutil.move</code> 跨卷时退化成 copy + unlink，<strong>非原子</strong>。中途断电会留下「目标半成品 + 源完好」，下次扫描会再次「成功归档」源文件，造成永久残留。</p>
+
+<div class="diagram">① os.replace(source, target)          同卷原子，一步到位
+   └─ 抛 OSError 且 errno == EXDEV 或 winerror == 17 → 跨卷，走 ②
+      其它 OSError（权限拒绝等）→ 原样抛出          ← 1.1.0 修正
+
+② shutil.copy2(source, target.partial)
+③ open(partial, "r+b") + os.fsync     Windows 必须 r+b 才能 fsync
+④ os.replace(partial, target)         原子 rename
+⑤ os.unlink(source)                   删源</div>
+
+<p><strong>失败模型完备</strong>：</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>崩溃点</th><th>残留</th><th>下次扫描的结果</th></tr></thead>
+  <tbody>
+    <tr><td>② copy 中途</td><td><code>.partial</code> + 源完好</td><td>重做即可</td></tr>
+    <tr><td>③ fsync 后 / ④ rename 前</td><td>同上</td><td>重做即可</td></tr>
+    <tr><td>④ rename 后 / ⑤ unlink 前</td><td>target 已成形 + 源残留</td><td>源被识别为字节重复进 duplicates，不丢数据</td></tr>
+    <tr><td>（旧实现）<code>shutil.move</code> 跨卷 copy 中途</td><td>target 半成品 + 源完好</td><td>源被「成功」归档，半成品永久残留 ✗</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note ok">
+  <span class="label">1.1.0 修正：EXDEV 判定</span>
+  <p>此前第 ① 步用裸 <code>except OSError: pass</code>。权限拒绝、目标被占用等同样是 <code>OSError</code>，会被误当作跨卷而退化成 copy 两阶段 —— 把一个本该失败的移动变成「复制一份再删源」；若删源同样因权限失败，就留下两份数据。现在只有 <code>errno.EXDEV</code>（或 Windows <code>winerror 17</code>）才走两阶段。</p>
+</div>
+
+<h3 id="a-date">5.3 时间来源判定</h3>
+
+<p><code>DATE_KEYS</code> 按权威性排序，<code>_parse_exif_record</code> 取第一个能解析的字段。</p>
+
+<div class="note warn">
+  <span class="label">1.1.0 修正：File:FileModifyDate 已移出候选</span>
+  <p>该字段对<strong>任何文件</strong>都存在（它就是 mtime）。一旦纳入候选，<code>_parse_exif_record</code> 永远有返回值，于是：</p>
+  <ul>
+    <li><code>_from_pillow</code> 成为死代码，永远走不到</li>
+    <li>从 iPhone 拷出、EXIF 被剥掉的照片按<strong>拷贝时间</strong>归到错误年份</li>
+    <li>日志标注 <code>source=exiftool</code>，用户以为读到了真实拍摄时间</li>
+  </ul>
+  <p>现在没有真实拍摄时间就一路降级到 mtime，由 <code>source</code> 标签如实反映，<code>Stats.date_from_mtime</code> 计数，汇总末尾发 <code>WARNING</code>。<code>query_batch</code> 也不再请求该字段。</p>
+</div>
+
+<h2 id="perf">6 · 性能优化总览</h2>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>优化</th><th>位置</th><th>效果</th><th>代价</th></tr></thead>
+  <tbody>
+    <tr><td>ExifTool 持久进程</td><td>exiftool.py</td><td><strong>~10–13x</strong>（5000 张 25min → 2–3min）</td><td>协议复杂，stderr / <code>-q</code> 陷阱</td></tr>
+    <tr><td>size 短路去重</td><td>core.py</td><td>size 唯一文件 IO 归零</td><td>需维护欠账表</td></tr>
+    <tr><td>BK-tree 视觉去重</td><td>dedup.py</td><td>1 万张 O(N²) → 接近 O(log N)</td><td>+60 行代码</td></tr>
+    <tr><td>并发 MD5</td><td>core.py</td><td>IO 密集 2–4x</td><td>workers 配置</td></tr>
+    <tr><td>并发 pHash <span class="tag done">1.1.0</span></td><td>core.py</td><td><strong>2.41x</strong>（28 张 HEIC / 85.6 MB：6.01s → 2.49s）</td><td>无</td></tr>
+    <tr><td>prewarm 与哈希重叠 <span class="tag done">1.1.0</span></td><td>core.py</td><td>省掉两阶段中较短的一段墙钟</td><td>+1 后台线程与中止钩子</td></tr>
+    <tr><td>周期 flush_state</td><td>state.py</td><td>断电最多丢 30s 进度</td><td>见下方实测</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>已量化但判定为「不值得优化」</h3>
+
+<p>交接文档曾把「状态文件 JSON 序列化」列为性能债，建议迁 SQLite。实测单次 <code>save_state</code>：</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>路径条数</th><th>单次耗时</th><th>状态文件</th><th>占 30 秒心跳周期</th></tr></thead>
+  <tbody>
+    <tr><td class="num">10 000</td><td class="num">15 ms</td><td class="num">0.8 MB</td><td class="num">0.05 %</td></tr>
+    <tr><td class="num">50 000</td><td class="num">73 ms</td><td class="num">3.8 MB</td><td class="num">0.24 %</td></tr>
+    <tr><td class="num">200 000</td><td class="num">311 ms</td><td class="num">15.3 MB</td><td class="num">1.04 %</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>心跳开销可以忽略。SQLite 的真实理由应当是<strong>启动读取</strong>与<strong>文件体积</strong>，而非写入耗时 —— 立项时别再引用「写入太慢」这个不成立的前提。</p>
+
+<h2 id="errors">7 · 错误处理与容错</h2>
+
+<div class="diagram">EXIF 读取:     ExifTool daemon → ExifTool 单文件 → Pillow EXIF → 文件 mtime（计数告警）
+ExifTool 进程: 启动失败/崩溃 → 重启（max 3）→ 全局 disable → 走后续降级
+HEIC 解码:     缺 pillow-heif → phash 返回 None → 启用 --phash 时启动告警
+单文件失败:   FailureRecord 收集 → continue 下一组 → 末尾统一打印
+状态文件:     损坏 → 警告并重新开始；v1 → 丢弃 hash 保留 path；v2 → 加载并告警欠账缺失</div>
+
+<h3>中断安全</h3>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>中断点</th><th>处理</th></tr></thead>
+  <tbody>
+    <tr><td>Ctrl+C（任意阶段）</td><td>signal handler 置 <code>_abort</code> 并抛 <code>KeyboardInterrupt</code> → <code>run()</code> 统一 flush_state + 返回 130</td></tr>
+    <tr><td>Ctrl+C（后台 prewarm 线程）</td><td>线程在批次间检查 <code>_abort</code> 退出，最多滞后一个批次（~100 文件）</td></tr>
+    <tr><td>Ctrl+C（线程池排队任务）</td><td><code>shutdown(wait=False, cancel_futures=True)</code> 取消排队，只等在跑的</td></tr>
+    <tr><td>daemon 进程崩溃</td><td><code>poll()</code> 检测 → 重启 → 超限 disable 后继续主流程</td></tr>
+    <tr><td>跨卷 move 中途断电</td><td>两阶段提交，每个崩溃点都可恢复（见 5.2）</td></tr>
+    <tr><td>状态文件写入中途崩溃</td><td>tmp + replace 原子写，绝不留半截 JSON</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note warn">
+  <span class="label">1.1.0 修复：中断保护有洞</span>
+  <p>旧实现的 <code>try/except KeyboardInterrupt</code> 只包住主循环，而 MD5 并发与 ExifTool 预热都在主循环之前，且常常是整轮最耗时的部分。那段时间中断：<code>KeyboardInterrupt</code> 不是 <code>Exception</code> 子类 → 穿透 <code>run()</code> 的 try → 穿透 <code>main()</code> 的 <code>except Exception</code> → traceback 退出、状态不存盘、退出码非 130。</p>
+  <p>写回归测试时这个缺陷表现得很直观：<code>patch.object(org, "_parallel_hash", side_effect=KeyboardInterrupt)</code> 直接把整个 pytest 会话打断了。</p>
+</div>
+
+<h2 id="tests">8 · 测试策略</h2>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>文件</th><th>用例</th><th>覆盖目标</th></tr></thead>
+  <tbody>
+    <tr><td><code>test_grouping.py</code></td><td class="num">11</td><td>normalize_stem 边界、group_files 同 stem 配对（含 IMG_E AAE 关键回归）</td></tr>
+    <tr><td><code>test_exiftool_daemon.py</code></td><td class="num">11</td><td>协议格式、空路径短路、EOF 抛错、崩溃重启、超限拒绝、close 三态</td></tr>
+    <tr><td><code>test_date_resolver.py</code></td><td class="num">13</td><td>缓存命中、daemon 失败降级、close 幂等、<strong>拍摄时间来源判定与 mtime 计数</strong></td></tr>
+    <tr><td><code>test_phash_bktree.py</code></td><td class="num">9</td><td>空树 / 单节点 / 多节点、距离排序、500 节点剪枝正确性、Organizer 集成</td></tr>
+    <tr><td><code>test_atomic_move.py</code></td><td class="num">5</td><td>同卷 replace、跨卷两阶段、copy 失败清理、<strong>非跨卷错误不退化</strong></td></tr>
+    <tr><td><code>test_size_shortcut.py</code></td><td class="num">5</td><td>size 唯一跳过、批次重复必算、历史撞 size 必算</td></tr>
+    <tr><td><code>test_state_versions.py</code></td><td class="num">6</td><td>v1 / v2 / v3 加载与迁移、v3 往返等价、空欠账不写盘</td></tr>
+    <tr><td><code>test_interrupt.py</code></td><td class="num">4</td><td>MD5 / prewarm 阶段中断 → 130 + 存盘 + daemon 关闭</td></tr>
+    <tr><td><code>test_heic_support.py</code></td><td class="num">4</td><td>HEIC 解码、结果稳定性、缺依赖时告警（未装 pillow-heif 时跳过 2 项）</td></tr>
+    <tr><td><code>test_cross_run_dedup.py</code></td><td class="num">3</td><td>跨次运行判重、同 size 不同内容不误判、参照物缺失不崩</td></tr>
+    <tr><td><code>test_dry_run.py</code></td><td class="num">3</td><td>零目录副作用、源文件不动、仍正确统计</td></tr>
+    <tr><td><strong>合计</strong></td><td class="num"><strong>74</strong></td><td>—</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>设计原则</h3>
+<ul>
+  <li><strong>mock 外部进程</strong>：ExifTool 用 <code>MagicMock(Popen)</code>，不依赖真实 exe</li>
+  <li><strong>真实文件 IO</strong>：<code>tmp_path</code> 写真实小文件，不 mock filesystem（避免 mock 错位）</li>
+  <li><strong>每个修过的 bug 都有专用回归测试</strong>：IMG_E 配对、size 短路、跨次去重、跨卷两阶段、BK-tree 剪枝、dry-run 副作用、中断覆盖</li>
+</ul>
+
+<div class="note">
+  <span class="label">patch 目标与模块边界</span>
+  <p>拆包后 <code>patch("organizer.md5_of")</code> 这类目标全部失效 —— 打在兼容入口的名字上不会影响 <code>imageorg.core</code> 里的查找。现在的约定是：<strong>被测试 patch 的名字必须通过模块属性访问</strong>（<code>dedup.md5_of(...)</code>、<code>imaging.HEIC_SUPPORTED</code>、<code>exiftool.ExifToolDaemon(...)</code>），测试则 patch <code>imageorg.&lt;模块&gt;.&lt;名字&gt;</code>。新增可被 mock 的跨模块调用时请沿用这个写法。</p>
+</div>
+
+<p><strong>未覆盖</strong>：心跳、汇总打印、CLI argparse（IO 层，由端到端手工验证兜底）。</p>
+
+<h2 id="debt">9 · 已知技术债</h2>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>状态</th><th>问题</th><th>位置</th><th>方向</th></tr></thead>
+  <tbody>
+    <tr><td><span class="tag done">已解决</span></td><td>HEIC pHash 静默失败</td><td>imaging.py</td><td>1.1.0 接入 pillow-heif + 缺失告警</td></tr>
+    <tr><td><span class="tag done">已解决</span></td><td>单文件 1187 行违反 ≤800 行约束</td><td>—</td><td>1.1.0 拆为 imageorg/ 十模块，最大 589 行</td></tr>
+    <tr><td><span class="tag done">已解决</span></td><td>跨次去重失效 / dry-run 副作用 / 中断保护有洞 / EXDEV 误判</td><td>—</td><td>1.1.0 全部修复并加回归测试</td></tr>
+    <tr><td><span class="tag p2">P2</span></td><td>状态文件无界增长</td><td>state.py</td><td>迁 SQLite。<strong>动因是启动读取与文件体积，不是写入耗时</strong>（见 §6 实测）</td></tr>
+    <tr><td><span class="tag p2">P2</span></td><td><code>processed_paths</code> 形同虚设</td><td>core.py</td><td>见下方说明</td></tr>
+    <tr><td><span class="tag todo">P3</span></td><td>没有 logs/ 文件输出</td><td>cli.py</td><td>加 FileHandler 写 <code>logs/organizer-YYYYMMDD.log</code></td></tr>
+    <tr><td><span class="tag todo">P3</span></td><td>没有 <code>--reset-state</code> / <code>--verify</code></td><td>cli.py</td><td>见交接文档待办</td></tr>
+    <tr><td><span class="tag todo">P3</span></td><td>Windows 长路径（&gt;260 字符）</td><td>core.py</td><td><code>\\?\</code> 前缀，需用 <code>os.path</code> 字符串操作</td></tr>
+    <tr><td><span class="tag todo">P4</span></td><td>没有 GPS 二次分组</td><td>core.py</td><td>同时间不同地点可再分子目录</td></tr>
+    <tr><td><span class="tag todo">P4</span></td><td>duplicates 的 Web 预览裁决</td><td>（独立工具）</td><td>streamlit，让用户选保留哪张</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note">
+  <span class="label">关于 processed_paths</span>
+  <p>它只记录<strong>移动成功</strong>的文件路径 —— 而这些文件此刻已不在源目录，下次扫描根本扫不到，过滤条件几乎永不命中。唯一真正生效的场景是「把同一份源目录原样拷回来再跑」。代价是它随文件数无界增长（20 万条约 15 MB）。</p>
+  <p>这是设计取舍不是 bug：要么承认这个场景并接受体积（迁 SQLite 后不成问题），要么去掉该机制、完全依赖 size+hash 去重。<strong>需要决策后再动</strong>。同理，它的路径 key 没做大小写/分隔符归一化 —— 但因为没有可观测行为，写不出有意义的失败测试，1.1.0 未改动。</p>
+</div>
+
+<h2 id="philosophy">10 · 工程哲学体现</h2>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>原则</th><th>落地</th></tr></thead>
+  <tbody>
+    <tr><td>简单 &gt; 优雅</td><td>BK-tree 自实现 60 行而非引入 pybktree 依赖</td></tr>
+    <tr><td>接口 &gt; 实现</td><td><code>DateResolver.resolve()</code> 公开签名零改动，prewarm / daemon 全在内部；<code>organizer.py</code> 保留为兼容入口，拆包对外零破坏</td></tr>
+    <tr><td>可维护 &gt; 一时方便</td><td>修一个 bug 必加一个回归测试；1.1.0 的五个修复各自都有先失败后通过的用例</td></tr>
+    <tr><td>并行 &gt; 串行</td><td>决策阶段 MD5 / pHash / prewarm 三者重叠，执行阶段才串行</td></tr>
+    <tr><td>可测试性优先</td><td>关键模块支持 mock 注入；跨模块调用统一走模块属性以便 patch</td></tr>
+    <tr><td>先量化再优化</td><td>save_state 实测后判定不必优化，而非照着直觉重写（见 §6）</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><strong>仍未达成</strong>：业务逻辑覆盖率 ≥ 80% —— 未做覆盖率统计，但关键决策路径全有测试。</p>
+
+<footer>
+  Image Organizer 1.1.0 · 配套文档：<a href="功能介绍.html">功能介绍</a> · <a href="项目交接文档.html">交接文档</a> · <a href="../README.md">README</a> · <a href="../CHANGELOG.md">CHANGELOG</a>
+</footer>
+
+</main>
+</div>
+</body>
+</html>
