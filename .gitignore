@@ -40,7 +40,7 @@ Thumbs.db
 logs/
 *.log
 *.organizer_state.json
-RESUME.md
+RESUME.*
 
 # ---------- ExifTool ----------
 # exiftool.exe 与 exiftool_files/ 已随仓库分发，开箱即用，无需另行下载
@@ -60,3 +60,4 @@ image/
 *.bak
 *.tmp
 *.partial
+.launcher-config.json

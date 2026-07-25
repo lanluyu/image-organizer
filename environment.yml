@@ -1,13 +1,24 @@
-name: image
-channels:
-  - conda-forge
-dependencies:
-  - python=3.11
-  - pillow
-  - pip
-  - pip:
-      - imagehash    # 可选: --phash 视觉去重时需要
-# 外部依赖 (非 Python):
+# 本项目运行在既有的 conda 环境 douyin（与抖音视频分析项目共用）。
+#
+# 该环境已存在，不要用 `conda env create`（会报 env 已存在）。补依赖用：
+#     conda env update -n douyin -f environment.yml
+#
+# 切勿加 --prune：那会删掉本文件未列出的包，而 douyin 环境里还装着
+# FunASR / torch 等另一个项目的依赖。
+#
+# 外部依赖（非 Python）：
 #   ExifTool: 仓库已自带 Windows 版 (./exiftool.exe + ./exiftool_files/)，开箱即用
 #   如需升级或换平台版本：https://exiftool.org/ 下载后覆盖到项目根
 #   detect_default_exiftool() 兼容旧约定 ./exiftool/exiftool.exe
+
+name: douyin
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pillow
+  - pip
+  - pip:
+      - imagehash     # 可选: --phash 视觉去重时需要
+      - pillow-heif   # HEIC 解码: iPhone 图库主体是 HEIC, 缺它 --phash 对其静默失效
+      - pytest        # 测试
