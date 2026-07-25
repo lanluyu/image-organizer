@@ -2,43 +2,59 @@
 chcp 65001 >nul
 setlocal
 
-REM =====================================================
-REM iPhone 照片整理 - 一键启动
-REM 双击即可运行，自动调用 organizer.py
-REM =====================================================
+REM ============================================================
+REM  iPhone photo organizer - one-click run with fixed paths.
+REM  Edit the three paths below, then double-click this file.
+REM
+REM  For a guided setup with a dry-run preview, use the other
+REM  launcher instead (it opens a PowerShell 7 window).
+REM
+REM  IMPORTANT: keep this file PURE ASCII.
+REM  cmd.exe re-reads a batch file by byte offset after each
+REM  command. With multi-byte characters in the file that offset
+REM  drifts and cmd resumes parsing in the MIDDLE of a line,
+REM  running fragments as commands. A UTF-8 BOM does NOT fix it,
+REM  nor does re-encoding to GBK -- both were tested and still
+REM  broke. Chinese output below comes from organizer.py itself,
+REM  which writes to the console correctly.
+REM ============================================================
 
-REM ---- 路径配置 (按需修改) ----
+REM ---- Paths (edit these) ----
 set "SOURCE=D:\AHAHA\DCIM\Input_Photos"
 set "TARGET=D:\AHAHA\DCIM\Organized_Photos"
 set "DUPLICATES=D:\AHAHA\DCIM\Duplicates"
 
-REM ---- Python 解释器 (CLAUDE.md 指定的 conda lang 环境) ----
-set "PYTHON=D:\soft\Miniconda\envs\lang\python.exe"
+REM ---- Python interpreter (conda env "douyin", see environment.yml) ----
+set "PYTHON=D:\soft\Miniconda\envs\douyin\python.exe"
 
-REM ---- 切到脚本所在目录，确保相对路径 (exiftool/) 能找到 ----
+REM ---- Work from the script directory so ./exiftool.exe resolves ----
 cd /d "%~dp0"
 
 echo.
 echo ============================================================
-echo  iPhone 照片整理工具
+echo  iPhone Photo Organizer
 echo ============================================================
-echo  源目录:     %SOURCE%
-echo  目标目录:   %TARGET%
-echo  重复目录:   %DUPLICATES%
-echo  选项:       --phash --workers 8
+echo  Source:      %SOURCE%
+echo  Target:      %TARGET%
+echo  Duplicates:  %DUPLICATES%
+echo  Options:     --phash --workers 8
 echo ============================================================
 echo.
 
 if not exist "%SOURCE%" (
-    echo [错误] 源目录不存在: %SOURCE%
-    echo 请先创建并放入待整理的照片。
+    echo  [ERROR] Source folder does not exist:
+    echo          %SOURCE%
+    echo  Create it and put the photos to organize inside.
+    echo.
     pause
     exit /b 2
 )
 
 if not exist "%PYTHON%" (
-    echo [错误] Python 未找到: %PYTHON%
-    echo 请检查 conda 环境路径。
+    echo  [ERROR] Python not found:
+    echo          %PYTHON%
+    echo  Check the conda environment path above.
+    echo.
     pause
     exit /b 2
 )
@@ -53,10 +69,10 @@ if not exist "%PYTHON%" (
 set "RC=%ERRORLEVEL%"
 echo.
 echo ============================================================
-if %RC% EQU 0     echo  [成功] 全部归档完成
-if %RC% EQU 1     echo  [警告] 有业务失败，请查看上方失败清单
-if %RC% EQU 2     echo  [错误] 脚本异常，请查看日志排查
-if %RC% EQU 130   echo  [中断] 用户取消，状态已保存，下次运行可续跑
+if %RC% EQU 0   echo  [OK]        All files archived.
+if %RC% EQU 1   echo  [WARNING]   Some files failed - see the failure list above.
+if %RC% EQU 2   echo  [ERROR]     Script error - see the failure list above.
+if %RC% EQU 130 echo  [CANCELLED] Interrupted by user. Progress saved, re-run to resume.
 echo ============================================================
 echo.
 pause
