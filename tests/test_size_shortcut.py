@@ -72,7 +72,7 @@ class TestProcessGroupSizeShortcut:
         f1 = _make_file(tmp_path / "src", "a.jpg", b"x" * 100)
         group = FileGroup(primary=f1, companions=[])
 
-        with patch("organizer.md5_of") as mock_md5, \
+        with patch("imageorg.dedup.md5_of") as mock_md5, \
              patch.object(organizer.date_resolver, "resolve",
                           return_value=(__import__("datetime").datetime(2024, 1, 15), "test")):
             organizer._process_group(group, size=100, file_hash=None)
@@ -87,7 +87,7 @@ class TestProcessGroupSizeShortcut:
         group = FileGroup(primary=f1, companions=[])
         organizer._size_to_hashes[5] = {"some_other_hash"}  # 同 size 历史
 
-        with patch("organizer.md5_of", return_value="new_hash") as mock_md5, \
+        with patch("imageorg.dedup.md5_of", return_value="new_hash") as mock_md5, \
              patch.object(organizer.date_resolver, "resolve",
                           return_value=(__import__("datetime").datetime(2024, 1, 15), "test")):
             organizer._process_group(group, size=5, file_hash=None)

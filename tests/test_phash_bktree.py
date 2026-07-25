@@ -113,7 +113,7 @@ class TestOrganizerIntegration:
 
         # 让 phash_of 第一次返回 "ff00"，第二次返回 "ff01" (距离 1，命中阈值 4)
         from datetime import datetime
-        with patch("organizer.phash_of", side_effect=["ff00", "ff01"]), \
+        with patch("imageorg.dedup.phash_of", side_effect=["ff00", "ff01"]), \
              patch.object(org.date_resolver, "resolve",
                           return_value=(datetime(2024, 1, 1), "test")):
             org._process_group(FileGroup(primary=f1, companions=[]), size=100, file_hash="h1")

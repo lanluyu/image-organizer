@@ -33,7 +33,7 @@ class TestQueryBatchProtocol:
         )
         proc = _make_proc_mock([json_line, "{ready}\n"])
 
-        with patch("organizer.subprocess.Popen", return_value=proc):
+        with patch("imageorg.exiftool.subprocess.Popen", return_value=proc):
             d = ExifToolDaemon(Path("exiftool.exe"))
             result = d.query_batch([Path("/x/a.jpg")])
 
@@ -54,7 +54,7 @@ class TestQueryBatchProtocol:
 
     def test_empty_paths_no_subprocess_call(self):
         """paths=[] 时不应启动子进程"""
-        with patch("organizer.subprocess.Popen") as mock_popen:
+        with patch("imageorg.exiftool.subprocess.Popen") as mock_popen:
             d = ExifToolDaemon(Path("exiftool.exe"))
             result = d.query_batch([])
         assert result == {}
@@ -65,7 +65,7 @@ class TestQueryBatchProtocol:
         proc = _make_proc_mock([""])  # 立刻 EOF
         proc.poll.return_value = 1  # 已死
 
-        with patch("organizer.subprocess.Popen", return_value=proc):
+        with patch("imageorg.exiftool.subprocess.Popen", return_value=proc):
             d = ExifToolDaemon(Path("exiftool.exe"))
             with pytest.raises(RuntimeError, match="EOF"):
                 d.query_batch([Path("/x/a.jpg")])
@@ -79,7 +79,7 @@ class TestRestartLogic:
         proc1 = _make_proc_mock([json_line, "{ready}\n"])
         proc2 = _make_proc_mock([json_line, "{ready}\n"])
 
-        with patch("organizer.subprocess.Popen", side_effect=[proc1, proc2]) as mock_popen:
+        with patch("imageorg.exiftool.subprocess.Popen", side_effect=[proc1, proc2]) as mock_popen:
             d = ExifToolDaemon(Path("exiftool.exe"), max_restarts=3)
             d.query_batch([Path("/x/a.jpg")])  # 启动 proc1
             # 模拟 proc1 死了
@@ -102,7 +102,7 @@ class TestRestartLogic:
 
         procs = [make_dead_proc() for _ in range(10)]
 
-        with patch("organizer.subprocess.Popen", side_effect=procs):
+        with patch("imageorg.exiftool.subprocess.Popen", side_effect=procs):
             d = ExifToolDaemon(Path("exiftool.exe"), max_restarts=2)
             d._start()  # 手动启动 proc[0]
             # 现在 proc[0] 已死，下面 _ensure_alive 会重启
@@ -125,7 +125,7 @@ class TestClose:
         proc.poll.return_value = None  # 存活
         proc.wait.return_value = 0
 
-        with patch("organizer.subprocess.Popen", return_value=proc):
+        with patch("imageorg.exiftool.subprocess.Popen", return_value=proc):
             d = ExifToolDaemon(Path("exiftool.exe"))
             d._start()
             d.close()
@@ -140,7 +140,7 @@ class TestClose:
         proc = _make_proc_mock([])
         proc.poll.return_value = 0  # 已退出
 
-        with patch("organizer.subprocess.Popen", return_value=proc):
+        with patch("imageorg.exiftool.subprocess.Popen", return_value=proc):
             d = ExifToolDaemon(Path("exiftool.exe"))
             d._start()
             d.close()

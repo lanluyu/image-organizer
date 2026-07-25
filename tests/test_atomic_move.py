@@ -17,7 +17,7 @@ class TestAtomicMove:
         tgt = tmp_path / "sub" / "a.jpg"
         tgt.parent.mkdir()
 
-        with patch("organizer.shutil.copy2") as mock_copy:
+        with patch("imageorg.core.shutil.copy2") as mock_copy:
             Organizer._atomic_move(src, tgt)
 
         assert tgt.read_bytes() == b"hello"
@@ -42,7 +42,7 @@ class TestAtomicMove:
             # 第二次 (.partial → target) 让它真做
             return original_replace(s, t)
 
-        with patch("organizer.os.replace", side_effect=fake_replace):
+        with patch("imageorg.core.os.replace", side_effect=fake_replace):
             Organizer._atomic_move(src, tgt)
 
         assert tgt.read_bytes() == b"hello"
@@ -65,14 +65,63 @@ class TestAtomicMove:
             Path(t).write_bytes(b"hal")
             raise IOError("disk full")
 
-        with patch("organizer.os.replace", side_effect=cross_volume), \
-             patch("organizer.shutil.copy2", side_effect=copy_fail):
+        with patch("imageorg.core.os.replace", side_effect=cross_volume), \
+             patch("imageorg.core.shutil.copy2", side_effect=copy_fail):
             with pytest.raises(IOError):
                 Organizer._atomic_move(src, tgt)
 
         assert src.read_bytes() == b"hello", "源文件必须完好"
         assert not tgt.exists(), "target 不应成形"
         assert not (tgt.parent / "a.jpg.partial").exists(), ".partial 必须清理"
+
+
+class TestNonCrossVolumeErrors:
+    """只有"跨卷"才该退到 copy 两阶段。其它 OSError 必须原样抛出。
+
+    权限拒绝、目标被占用等都是 OSError，若一律当跨卷处理，就会把一个本该失败的
+    移动变成"复制一份再删源"，在删源同样失败时留下两份数据。
+    """
+
+    def test_permission_error_is_not_treated_as_cross_volume(self, tmp_path):
+        src = tmp_path / "a.jpg"
+        src.write_bytes(b"hello")
+        tgt = tmp_path / "sub" / "a.jpg"
+        tgt.parent.mkdir()
+
+        def denied(s, t):
+            raise PermissionError(13, "Permission denied")
+
+        with patch("imageorg.core.os.replace", side_effect=denied), \
+             patch("imageorg.core.shutil.copy2") as mock_copy:
+            with pytest.raises(PermissionError):
+                Organizer._atomic_move(src, tgt)
+
+        assert mock_copy.call_count == 0, "权限错误不该退化成 copy"
+        assert src.read_bytes() == b"hello", "源文件必须完好"
+
+    def test_windows_not_same_device_is_cross_volume(self, tmp_path):
+        """Windows 上跨卷可能只带 winerror 17 (ERROR_NOT_SAME_DEVICE)"""
+        src = tmp_path / "a.jpg"
+        src.write_bytes(b"hello")
+        tgt = tmp_path / "sub" / "a.jpg"
+        tgt.parent.mkdir()
+
+        original_replace = os.replace
+        calls = {"n": 0}
+
+        def fake_replace(s, t):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                err = OSError(0, "cannot move the file to a different disk drive")
+                err.winerror = 17
+                raise err
+            return original_replace(s, t)
+
+        with patch("imageorg.core.os.replace", side_effect=fake_replace):
+            Organizer._atomic_move(src, tgt)
+
+        assert tgt.read_bytes() == b"hello"
+        assert not src.exists()
 
 
 if __name__ == "__main__":

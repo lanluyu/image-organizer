@@ -39,7 +39,7 @@ class TestPrewarmAndCache:
         }
 
         r = DateResolver(exiftool_path=fake_exiftool)
-        with patch("organizer.ExifToolDaemon", return_value=mock_daemon):
+        with patch("imageorg.exiftool.ExifToolDaemon", return_value=mock_daemon):
             r.prewarm([f])
 
         # 命中缓存
@@ -57,12 +57,12 @@ class TestPrewarmAndCache:
         f.write_bytes(b"x")
 
         r = DateResolver(exiftool_path=fake_exiftool)
-        with patch("organizer.ExifToolDaemon", side_effect=RuntimeError("启动失败")):
+        with patch("imageorg.exiftool.ExifToolDaemon", side_effect=RuntimeError("启动失败")):
             r.prewarm([f])
 
         assert r._daemon_disabled is True
         # resolve 不应再触发 daemon (走 mtime fallback)
-        with patch("organizer.ExifToolDaemon") as mock_class:
+        with patch("imageorg.exiftool.ExifToolDaemon") as mock_class:
             dt, src = r.resolve(f)
             assert mock_class.call_count == 0
         assert src == "mtime"
@@ -89,7 +89,7 @@ class TestPrewarmAndCache:
         ]
 
         r = DateResolver(exiftool_path=fake_exiftool)
-        with patch("organizer.ExifToolDaemon", return_value=mock_daemon):
+        with patch("imageorg.exiftool.ExifToolDaemon", return_value=mock_daemon):
             r.prewarm([f1, f2], batch_size=1)
 
         assert r._daemon_disabled is False, "单批失败不应全局禁用"
@@ -115,7 +115,7 @@ class TestResolveFallback:
         }
 
         r = DateResolver(exiftool_path=fake_exiftool)  # 不调 prewarm
-        with patch("organizer.ExifToolDaemon", return_value=mock_daemon):
+        with patch("imageorg.exiftool.ExifToolDaemon", return_value=mock_daemon):
             dt, src = r.resolve(f)
 
         assert src == "exiftool"
@@ -132,7 +132,7 @@ class TestResolveFallback:
         mock_daemon.query_batch.side_effect = RuntimeError("daemon 死了")
 
         r = DateResolver(exiftool_path=fake_exiftool)
-        with patch("organizer.ExifToolDaemon", return_value=mock_daemon):
+        with patch("imageorg.exiftool.ExifToolDaemon", return_value=mock_daemon):
             dt, src = r.resolve(f)
 
         assert src == "mtime"
@@ -157,6 +157,85 @@ class TestClose:
 
         assert mock_daemon.close.called
         assert r._daemon is None
+
+
+class TestCaptureTimeProvenance:
+    """归档时间的来源必须如实反映: 文件系统时间不能冒充拍摄时间。
+
+    exiftool 对任何文件都会返回 File:FileModifyDate (即 mtime)。若把它当作
+    有效的拍摄时间，则从 iPhone 拷出、EXIF 被剥掉的照片会按"拷贝时间"归档到
+    错误的年份，而日志显示 source=exiftool，用户无从察觉。
+    """
+
+    def test_file_modify_date_alone_is_not_a_capture_time(self):
+        """记录里只有 File:FileModifyDate → 视为没有拍摄时间"""
+        rec = {"SourceFile": "x.jpg", "File:FileModifyDate": "2019:03:15 10:30:00+08:00"}
+        assert DateResolver._parse_exif_record(rec) is None
+
+    def test_real_exif_date_still_wins(self):
+        """有真实 EXIF 拍摄时间时正常解析，不受上一条影响"""
+        rec = {
+            "SourceFile": "x.jpg",
+            "EXIF:DateTimeOriginal": "2024:01:15 10:30:45",
+            "File:FileModifyDate": "2019:03:15 10:30:00+08:00",
+        }
+        assert DateResolver._parse_exif_record(rec) == datetime(2024, 1, 15, 10, 30, 45)
+
+    def test_no_exif_date_reports_mtime_source(self, tmp_path):
+        """无任何 EXIF 时间字段 → resolve 必须标注来源为 mtime"""
+        fake_exiftool = tmp_path / "exiftool.exe"
+        fake_exiftool.write_bytes(b"fake")
+        f = tmp_path / "photo.jpg"
+        f.write_bytes(b"x")
+
+        mock_daemon = MagicMock(spec=ExifToolDaemon)
+        mock_daemon.query_batch.return_value = {
+            _normalize_path_key(f): {
+                "SourceFile": str(f),
+                "File:FileModifyDate": "2019:03:15 10:30:00+08:00",
+            }
+        }
+
+        r = DateResolver(exiftool_path=fake_exiftool)
+        with patch("imageorg.exiftool.ExifToolDaemon", return_value=mock_daemon):
+            r.prewarm([f])
+            dt, src = r.resolve(f)
+
+        assert src == "mtime", "只有文件系统时间时不得标注为 exiftool"
+
+
+class TestMtimeFallbackCounter:
+    """降级到文件系统时间的数量必须计数并出现在汇总里"""
+
+    def test_stats_counts_mtime_fallback(self, tmp_path):
+        from organizer import Config, FileGroup, Organizer
+
+        src = tmp_path / "src"
+        src.mkdir()
+        f = src / "a.jpg"
+        f.write_bytes(b"x" * 100)
+
+        org = Organizer(Config(source_dir=src, target_dir=tmp_path / "tgt",
+                               duplicate_dir=tmp_path / "dup", exiftool_path=None))
+        org._process_group(FileGroup(primary=f, companions=[]), size=100, file_hash=None)
+
+        assert org.stats.date_from_mtime == 1
+
+    def test_stats_does_not_count_real_exif(self, tmp_path):
+        from organizer import Config, FileGroup, Organizer
+
+        src = tmp_path / "src"
+        src.mkdir()
+        f = src / "a.jpg"
+        f.write_bytes(b"x" * 100)
+
+        org = Organizer(Config(source_dir=src, target_dir=tmp_path / "tgt",
+                               duplicate_dir=tmp_path / "dup", exiftool_path=None))
+        with patch.object(org.date_resolver, "resolve",
+                          return_value=(datetime(2024, 1, 15), "exiftool")):
+            org._process_group(FileGroup(primary=f, companions=[]), size=100, file_hash=None)
+
+        assert org.stats.date_from_mtime == 0
 
 
 if __name__ == "__main__":
